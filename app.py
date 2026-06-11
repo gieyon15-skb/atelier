@@ -57,12 +57,21 @@ def bytes_to_temp(b: bytes, suffix=".jpg") -> str:
 
 
 def make_blank_mask(person_path: str) -> str:
-    """A blank layer so CatVTON's editor input is valid and it falls back to auto-masking."""
+    """A blank (non-RGBA) layer so CatVTON's editor input is valid and it falls back to auto-masking."""
     with Image.open(person_path) as im:
         w, h = im.size
     fd, p = tempfile.mkstemp(suffix=".png")
     os.close(fd)
-    Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(p)
+    Image.new("RGB", (w, h), (0, 0, 0)).save(p)  # RGB, never RGBA -> safe to re-save as JPEG
+    return p
+
+
+def to_rgb_jpeg_temp(path: str) -> str:
+    """Re-encode any image to a clean RGB JPEG. Keeps the layering chain free of RGBA."""
+    img = Image.open(path).convert("RGB")
+    fd, p = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    img.save(p, "JPEG", quality=95)
     return p
 
 
@@ -248,14 +257,14 @@ if go:
                 status.write(f"Putting on piece {i + 1}/{len(st.session_state.outfit)} — {TYPE_LABEL[g['type']]}…")
                 garment_ref = g["ref"] if g["is_url"] else bytes_to_temp(g["bytes"])
                 result = run_catvton(client, current_person, garment_ref, g["type"], steps, cfg, seed)
-                current_person = extract_image_path(result)   # feed forward for layering
+                current_person = to_rgb_jpeg_temp(extract_image_path(result))   # normalize + feed forward
             status.update(label="Outfit complete.", state="complete")
 
         st.image(current_person, caption="Final look", use_container_width=True)
         try:
             with open(current_person, "rb") as f:
                 img_bytes = f.read()
-            st.download_button("Download image", img_bytes, file_name="look.png", mime="image/png")
+            st.download_button("Download image", img_bytes, file_name="look.jpg", mime="image/jpeg")
             st.session_state.gallery.insert(0, img_bytes)
         except Exception:
             pass
