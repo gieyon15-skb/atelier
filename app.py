@@ -18,8 +18,10 @@ import os
 import tempfile
 
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 from gradio_client import Client, handle_file
+
+APP_VERSION = "build 7 · 2026-06-11"
 
 # Public CatVTON Spaces with the garment-type API. Second is a duplicate fallback.
 SPACES = [
@@ -41,7 +43,9 @@ def read_token() -> str:
 
 
 def upload_to_bytes(uploaded, max_dim: int = 1024) -> bytes:
-    img = Image.open(uploaded).convert("RGB")
+    img = Image.open(uploaded)
+    img = ImageOps.exif_transpose(img)  # honor the phone's rotation tag (fixes sideways photos)
+    img = img.convert("RGB")
     img.thumbnail((max_dim, max_dim))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=90)
@@ -85,31 +89,19 @@ def get_client(space_id: str, token: str):
 
 def _looks_missing(e) -> bool:
     s = str(e).lower()
-    return any(k in s for k in ["cannot find a function", "not a valid", "no api endpoint", "out of range"])
+    return any(k in s for k in ["cannot find a function", "not a valid", "no api endpoint", "valid endpoint"])
 
 
-def run_catvton(client, person_path, garment_ref, cloth_type, steps, cfg, seed):
-    """
-    Call CatVTON's submit endpoint. Positional args in the Space's order:
-        [person(editor dict), cloth, cloth_type, steps, guidance_scale, seed, show_type]
-    show_type='result only' gives just the try-on image (needed for layering).
-    The endpoint has no fixed api_name, so we try names then fn_index.
-    """
-    blank = make_blank_mask(person_path)
-    person_arg = {
-        "background": handle_file(person_path),
-        "layers": [handle_file(blank)],
-        "composite": handle_file(person_path),
-    }
-    args = (
-        person_arg,
-        handle_file(garment_ref),
-        cloth_type,
-        int(steps),
-        float(cfg),
-        int(seed),
-        "result only",
-    )
+def _is_shape_error(e) -> bool:
+    """Input-shape/format problems that mean we should try a different person-input form."""
+    s = str(e).lower()
+    return any(k in s for k in [
+        "rgba", "index out of range", "indices must", "subscriptable",
+        "argument", "missing", "expected", "nonetype", "not enough values",
+    ])
+
+
+def _attempt(client, args):
     last = None
     for name in ["/submit_function", "/submit", "/predict", "/tryon"]:
         try:
@@ -117,14 +109,42 @@ def run_catvton(client, person_path, garment_ref, cloth_type, steps, cfg, seed):
         except Exception as e:
             last = e
             if not _looks_missing(e):
-                raise
-    for idx in [1, 0, 2, 3]:
+                raise               # endpoint found; real/shape error -> bubble up
+    for idx in [1, 0, 2, 3]:        # last-ditch: unnamed endpoint by index
         try:
             return client.predict(*args, fn_index=idx)
         except Exception as e:
             last = e
-            if not _looks_missing(e):
-                raise
+    raise last
+
+
+def run_catvton(client, person_path, garment_ref, cloth_type, steps, cfg, seed):
+    """
+    CatVTON arg order: [person, cloth, cloth_type, steps, guidance_scale, seed, show_type].
+    'result only' returns just the try-on image (needed for layering). The endpoint has no
+    fixed api_name, so we try names then index. We send the person as an editor input with
+    EMPTY layers first (the proven pattern that avoids the RGBA-layer error), and fall back
+    to a blank mask layer only if the Space requires one.
+    """
+    forms = [
+        lambda: {"background": handle_file(person_path), "layers": [], "composite": None},
+        lambda: {
+            "background": handle_file(person_path),
+            "layers": [handle_file(make_blank_mask(person_path))],
+            "composite": handle_file(person_path),
+        },
+    ]
+    last = None
+    for i, make_person in enumerate(forms):
+        args = (make_person(), handle_file(garment_ref), cloth_type,
+                int(steps), float(cfg), int(seed), "result only")
+        try:
+            return _attempt(client, args)
+        except Exception as e:
+            last = e
+            if i < len(forms) - 1 and _is_shape_error(e):
+                continue            # try the next person-input form
+            raise
     raise last
 
 
@@ -154,6 +174,7 @@ if "gallery" not in st.session_state:
 
 # ----------------------------- sidebar -----------------------------
 st.sidebar.title("Setup")
+st.sidebar.caption(f"🏷️ {APP_VERSION}")
 
 token = read_token()
 if token:
@@ -183,6 +204,7 @@ st.sidebar.caption(
 # ----------------------------- main -----------------------------
 st.title("👗 Virtual Try-On Studio")
 st.write("Free try-on with **CatVTON** — does tops, bottoms, and dresses, and layers a full outfit.")
+st.caption(f"🏷️ {APP_VERSION}")
 
 # 1) Person
 st.subheader("1 · Person")
