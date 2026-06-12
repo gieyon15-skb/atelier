@@ -1,0 +1,9 @@
+# Put this file at:  .streamlit/config.toml  (in the repo, next to app.py's folder root)
+# It sets the app's base palette; the CSS inside app.py adds the fonts and animations.
+
+[theme]
+primaryColor = "#FF5C8A"
+backgroundColor = "#12101A"
+secondaryBackgroundColor = "#1C1926"
+textColor = "#F2EEE8"
+font = "sans serif"
